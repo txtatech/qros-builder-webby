@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<body>
+
+    <script src="jsQR.js"></script>
+    <script src="pako.min.js"></script>
+    <script src="worker.js"></script>
+
+    <div id="frameContainer"></div>
+<div>
+    <iframe id="iframe1" style="width:10%; height:10%;"></iframe>
+    <iframe id="iframe2" style="width:10%; height:10%;"></iframe>
+    <iframe id="iframe3" style="width:10%; height:10%;"></iframe>
+    <iframe id="urlIframe" style="width:30%; height:100%;"></iframe>
+</div>
+<div id="status"></div>
+    <div>
+    <video id="video1" width="5%" height="5%" autoplay muted loop>
+        <source src="index.mp4" type="video/mp4">
+    </video>
+    <video id="video2" width="5%" height="5%" autoplay muted loop style="display:none;">
+        <source src="seabios.mp4" type="video/mp4">
+    </video>
+    <video id="video3" width="5%" height="5%" autoplay muted loop>
+        <source src="vgabios.mp4" type="video/mp4">
+    </video>
+
+    <video id="video4" width="5%" height="5%" autoplay muted loop style="display:none;">
+        <source src="linux.mp4" type="video/mp4">
+    </video>
+</div>
+
+    <script>
+let worker = new Worker('worker.js');
+
+worker.addEventListener('message', function(e) {
+    let htmlLines = e.data;
+    let html = htmlLines.join('<br>');
+    document.getElementById('urlIframe').srcdoc = html;
+}, false);
+
+// Start the worker
+worker.postMessage('start');
+
+    </script>
+
+<script>
+    let db1;
+    let dbReq = indexedDB.open('qrDB', 1);
+    let videoQueue = ['video1', 'video2', 'video3', 'video4'];
+
+    dbReq.onupgradeneeded = function(event) {
+        db1 = event.target.result;
+        let blobs;
+        if (!db1.objectStoreNames.contains('blobs')) {
+            blobs = db1.createObjectStore('blobs', {autoIncrement: true});
+        }
+        if (!db1.objectStoreNames.contains('qrData')) {
+            let qrData = db1.createObjectStore('qrData', {keyPath: 'videoId'});
+        }
+    }
+    dbReq.onsuccess = function(event) {
+        db1 = event.target.result;
+        processVideos();
+    }
+    dbReq.onerror = function(event) {
+        console.error('error opening database ' + event.target.errorCode);
+    }
+
+    function processVideos() {
+        if(videoQueue.length > 0) {
+            let videoId = videoQueue.shift();
+            processVideo(videoId);
+        }
+    }
+
+    function processVideo(videoId) {
+        document.getElementById('status').innerText = 'Processing ' + videoId;
+        let video = document.getElementById(videoId);
+        video.style.display = "block";  // Make the video visible
+        video.playbackRate = 0.3;
+
+        let iframe = document.getElementById('iframe' + videoId.charAt(videoId.length-1));
+        let canvas = document.createElement('canvas');
+        let context = canvas.getContext('2d', { willReadFrequently: true });
+
+        canvas.width = 730;
+        canvas.height = 730;
+
+        // Create Image object outside of loop
+        let img = new Image();
+
+        let encodedData = "";
+        let decodedFrames = 0;
+        let totalFrames = null;
+
+        video.addEventListener('play', function () {
+            let $this = this;
+
+            (function loop() {
+                if (!$this.paused && !$this.ended) {
+                    context.clearRect(0, 0, 730, 730);
+                    context.drawImage($this, 0, 0, 730, 730);
+                    let imageData = context.getImageData(0, 0, 730, 730);
+                    let code = jsQR(imageData.data, imageData.width, imageData.height, {
+                        inversionAttempts: "dontInvert",
+                    });
+
+                    if (code && code.data.startsWith('4,')) {
+                        console.log("Found QR code!");
+                        console.log(code.data);
+                        let frameInfo = code.data.split(',');
+                        totalFrames = parseInt(frameInfo[1]);
+                        let frameData = frameInfo[2];
+                        let inflated = pako.inflate(frameData, {to: 'string'});
+                        encodedData += inflated;
+
+                        iframe.srcdoc = encodedData;
+
+                        decodedFrames += 1;
+                    } else {
+                        console.log("No QR code found");
+                    }
+
+                    setTimeout(loop, 1000 / 30); // drawing at 30fps
+                }
+            })();
+
+            video.addEventListener('timeupdate', function() {
+                if (decodedFrames >= totalFrames) {
+                    this.pause();  // Pause the video
+                    this.style.display = "none";  // Hide the video
+                    let tx = db1.transaction(['qrData'], 'readwrite');
+                    let store = tx.objectStore('qrData');
+                    store.put({videoId: videoId, data: encodedData});
+
+                    tx.oncomplete = function() {
+                        console.log('stored data for ' + videoId);
+                        setTimeout(processVideos, 1000);  // Process the next video in the queue after 1 second
+                    }
+
+                    tx.onerror = function(event) {
+                        console.error('error storing data ' + event.target.errorCode);
+                    }
+                }
+            });
+
+        }, 0);
+    }
+
+</script>
+
+    <script>
+
+        // Assuming your full data is stored in 'fullData' variable
+        let fullData = "...";  // your actual full data here
+
+        // Create a new iframe element
+        let iframe = document.createElement('iframe');
+
+        // Set the source of the iframe to be your data
+        iframe.src = `data:text/html;base64,${btoa(fullData)}`;
+
+        // Append the iframe to the body of the document
+        document.body.appendChild(iframe);
+
+    </script>
+<script>
+
+    function logStoredData(videoId) {
+        let tx = db1.transaction(['qrData'], 'readonly');
+        let store = tx.objectStore('qrData');
+        let req = store.get(videoId);
+        req.onsuccess = function(event) {
+            let data = event.target.result;
+            if(data) {
+                console.log('Stored data for ' + videoId + ': ', data);
+            } else {
+                console.log('No stored data for ' + videoId);
+            }
+        }
+    }
+
+</script>
+</body>
+</html>

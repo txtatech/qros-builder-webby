@@ -1,0 +1,108 @@
+<html>
+<body>
+<script src="worker.js"></script>
+<script src="jsQR.js"></script>
+<script src="pako.min.js"></script>
+
+<div id="frameContainer"></div>
+<div>
+    <iframe id="iframe1" style="width:10%; height:10%;"></iframe>
+    <iframe id="iframe2" style="width:10%; height:10%;"></iframe>
+    <iframe id="iframe3" style="width:10%; height:10%;"></iframe>
+    <iframe id="urlIframe" style="width:50%; height:100%;"></iframe>
+</div>
+<div>
+    <video id="video1" width="5%" height="5%" autoplay muted loop>
+        <source src="index.mp4" type="video/mp4">
+    </video>
+
+    <video id="video2" width="5%" height="5%" autoplay muted loop style="display:none;">
+        <source src="seabios.mp4" type="video/mp4">
+    </video>
+
+    <video id="video3" width="5%" height="5%" autoplay muted loop style="display:none;">
+        <source src="linux.mp4" type="video/mp4">
+    </video>
+</div>
+<div id="status"></div>
+<script>
+let worker = new Worker('worker.js');
+
+worker.addEventListener('message', function(e) {
+    let htmlLines = e.data;
+    let html = htmlLines.join('<br>');
+    document.getElementById('urlIframe').srcdoc = html;
+}, false);
+
+worker.postMessage('start');
+
+let db;
+let dbReq = indexedDB.open('qrDB', 1);
+dbReq.onupgradeneeded = function(event) {
+    db = event.target.result;
+    let blobs;
+    if (!db.objectStoreNames.contains('blobs')) {
+        blobs = db.createObjectStore('blobs', {autoIncrement: true});
+    }
+    if (!db.objectStoreNames.contains('qrData')) {
+        let qrData = db.createObjectStore('qrData', {keyPath: 'videoId'});
+    }
+}
+dbReq.onsuccess = function(event) {
+    db = event.target.result;
+    processVideos('video1', 'video2', 'video3');  // Start processing the first video, then the second, and so on
+}
+dbReq.onerror = function(event) {
+    console.error('error opening database ' + event.target.errorCode);
+}
+
+function storeBlobData(videoId, blob) {
+    let tx = db.transaction(['blobs'], 'readwrite');
+    let store = tx.objectStore('blobs');
+    let blobData = {videoId: videoId, blob: blob, type: blob.type};
+    let request = store.add(blobData);
+    request.onsuccess = function() {
+        console.log('Blob data added to blobs store');
+    }
+    request.onerror = function() {
+        console.error('Error adding blob data to blobs store', request.error);
+    }
+}
+
+function storeQRData(videoId, qrCode) {
+    let tx = db.transaction(['qrData'], 'readwrite');
+    let store = tx.objectStore('qrData');
+    let qrData = {videoId: videoId, qrCode: qrCode};
+    let request = store.put(qrData);
+    request.onsuccess = function() {
+        console.log('QR data added to qrData store');
+    }
+    request.onerror = function() {
+        console.error('Error adding QR data to qrData store', request.error);
+    }
+}
+
+function processVideos(...videoIds) {
+    let currentIndex = 0;
+    const totalVideos = videoIds.length;
+    const processVideoCallback = () => {
+        currentIndex++;
+        if (currentIndex < totalVideos) {
+            processVideo(videoIds[currentIndex], processVideoCallback);
+        }
+    };
+    processVideo(videoIds[currentIndex], processVideoCallback);
+}
+
+function processVideo(videoId, callback) {
+    let videoElement = document.getElementById(videoId);
+    videoElement.play();
+
+    videoElement.onended = function() {
+        // When the video ends, call the callback to move to the next video
+        callback();
+    };
+}
+</script>
+</body>
+</html>
