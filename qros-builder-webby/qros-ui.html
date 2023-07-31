@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <script src="jsQR.js"></script>
+    <script src="pako.min.js"></script>
+    <script src="worker.js"></script>
+    <script src="libv86.js"></script>
+
+    <div id="frameContainer"></div>
+    <iframe id="iframe1" style="width:50%; height:50%;"></iframe>
+    <iframe id="iframe2" style="width:50%; height:50%;"></iframe>
+    <iframe id="iframe3" style="width:50%; height:50%;"></iframe>
+    <iframe id="urlIframe" style="width:50%; height:100%;"></iframe>
+    <div>
+    <video id="video1" width="5%" height="5%" autoplay muted loop>
+        <source src="index.mp4" type="video/mp4">
+    </video>
+
+    <video id="video2" width="5%" height="5%" autoplay muted loop style="display:none;">
+        <source src="qros.mp4" type="video/mp4">
+    </video>
+
+    <video id="video3" width="5%" height="5%" autoplay muted loop style="display:none;">
+        <source src="kolibri.mp4" type="video/mp4">
+    </video>
+</div>
+<div id="status"></div>
+    <script>
+let worker = new Worker('worker.js');
+
+worker.addEventListener('message', function(e) {
+    let htmlLines = e.data;
+    let html = htmlLines.join('<br>');
+    document.getElementById('urlIframe').srcdoc = html;
+}, false);
+
+// Start the worker
+worker.postMessage('start');
+
+    </script>
+
+    <script>
+    let db;
+    let dbReq = indexedDB.open('qrDB', 1);
+    dbReq.onupgradeneeded = function(event) {
+        db = event.target.result;
+        let blobs;
+        if (!db.objectStoreNames.contains('blobs')) {
+            blobs = db.createObjectStore('blobs', {autoIncrement: true});
+        }
+        if (!db.objectStoreNames.contains('qrData')) {
+            let qrData = db.createObjectStore('qrData', {keyPath: 'videoId'});
+        }
+    }
+    dbReq.onsuccess = function(event) {
+        db = event.target.result;
+        processVideo('video1', 'video2');  // Start processing the first video, then the second, and so on
+    }
+    dbReq.onerror = function(event) {
+        console.error('error opening database ' + event.target.errorCode);
+    }
+
+function storeBlobData(videoId, blob) {
+    let tx = db.transaction(['blobs'], 'readwrite');
+    let store = tx.objectStore('blobs');
+    let blobData = {videoId: videoId, blob: blob, type: blob.type};
+    let request = store.add(blobData);
+    request.onsuccess = function() {
+        console.log('Blob data added to blobs store');
+    }
+    request.onerror = function() {
+        console.error('Error adding blob data to blobs store', request.error);
+    }
+}
+
+function storeQRData(videoId, qrCode) {
+    let tx = db.transaction(['qrData'], 'readwrite');
+    let store = tx.objectStore('qrData');
+    let qrData = {videoId: videoId, qrCode: qrCode};
+    let request = store.put(qrData);
+    request.onsuccess = function() {
+        console.log('QR data added to qrData store');
+    }
+    request.onerror = function() {
+        console.error('Error adding QR data to qrData store', request.error);
+    }
+}
+
+    function processVideo(videoId, nextVideoId) {
+        document.getElementById('status').innerText = 'Processing ' + videoId;
+        let video = document.getElementById(videoId);
+        video.style.display = "block";  // Make the video visible
+        video.playbackRate = 2.2;
+
+        let iframe = document.getElementById('iframe' + videoId.charAt(videoId.length-1));
+        let canvas = document.createElement('canvas');
+        let context = canvas.getContext('2d', { willReadFrequently: true });
+
+        canvas.width = 730;
+        canvas.height = 730;
+
+        let encodedData = "";
+        let decodedFrames = 0;
+        let totalFrames = null;
+
+        video.addEventListener('play', function () {
+            let $this = this;
+            (function loop() {
+                if (!$this.paused && !$this.ended) {
+                    context.drawImage($this, 0, 0, $this.videoWidth, $this.videoHeight);
+                    let imageData = context.getImageData(0, 0, $this.videoWidth, $this.videoHeight);
+                    let newImageData = context.createImageData($this.videoWidth, $this.videoHeight);
+                    let threshold = 128;
+                    for (let i = 0; i < imageData.data.length; i += 4) {
+                        let grayscale = 0.3 * imageData.data[i] + 0.59 * imageData.data[i+1] + 0.11 * imageData.data[i+2];
+                        let binaryColor = grayscale > threshold ? 255 : 0;
+                        newImageData.data[i] = newImageData.data[i+1] = newImageData.data[i+2] = binaryColor;
+                        newImageData.data[i+3] = 255;  // Alpha channel
+                    }
+                    context.putImageData(newImageData, 0, 0);
+
+                    canvas.toBlob(function(blob) {
+                        storeBlobData(videoId, blob);
+                        let url = URL.createObjectURL(blob);
+                        let img = new Image();
+                        img.onload = function() {
+                            let code = jsQR(newImageData.data, img.width, img.height);
+                            if (code) {
+                                encodedData += code.data;
+                                decodedFrames++;
+                                storeQRData(videoId, code.data);
+                                console.log("QR code found: " + code.data);
+                            } else {
+                                console.log("No QR code found in frame");
+                            }
+                            URL.revokeObjectURL(url);
+                        };
+                        img.src = url;
+                    });
+                    requestAnimationFrame(loop);
+                }
+            })();
+        }, 0);
+
+        video.addEventListener('timeupdate', function() {
+            if (this.currentTime >= this.duration - 0.1) {  // Close to the end of the video
+                if (totalFrames === null) {
+                    totalFrames = decodedFrames;
+                    decodedFrames = 0;
+                    encodedData = "";
+                } else if (decodedFrames >= totalFrames) {
+                    this.pause();  // Pause the video
+                    try {
+                        let decodedData = atob(encodedData.replace(/-/g, '+').replace(/_/g, '/'));
+                        let bytes = new Uint8Array(decodedData.length);
+                        for (let i = 0; i < decodedData.length; i++) {
+                            bytes[i] = decodedData.charCodeAt(i);
+                        }
+                        let decompressedData = pako.inflate(bytes);
+                        let binaryString = String.fromCharCode.apply(null, decompressedData);
+                        let blob = new Blob([binaryString], {type: 'application/octet-binary'});
+                        let url = URL.createObjectURL(blob);
+                        // If the first video has finished playing, we assume the v86 library is loaded
+                        // and we create the V86Starter instances for the other videos
+                        if (videoId === 'video1' && this.ended) {
+                            // Uncomment and modify the following code according to your needs.
+
+                            let emulator = new V86Starter({
+                                screen_container: iframe,
+                                bios: {
+                                    url: url,  // Assuming that the first video's decoded data is the BIOS file
+                                },
+                                autostart: true,
+                            });
+
+                        }
+                        if (nextVideoId) {
+                            setTimeout(function() {
+                                processVideo(nextVideoId);  // Start processing the next video
+                            }, 5000);  // Delay of 5 seconds
+                        }
+                    } catch (error) {
+                        console.error("Error during decoding or decompression:", error);
+                    }
+                } else {
+                    decodedFrames = 0;
+                    encodedData = "";
+                }
+            }
+        });
+    }
+
+    </script>
+</body>
+</html>
