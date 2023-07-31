@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <video id="video" width="730" height="730" autoplay muted>
+        <source src="index.mp4" type="video/mp4">
+
+    </video>
+
+    <textarea id="output" rows="55" cols="500"></textarea>
+
+    <script src="jsQR.js"></script>
+    <script src="pako.min.js"></script>
+
+<div id="frameContainer"></div>
+<script>
+    let video = document.getElementById('video');
+    video.playbackRate = 0.1;
+
+    let output = document.getElementById('output');
+    let canvas = document.createElement('canvas');
+    let context = canvas.getContext('2d');
+    let frameContainer = document.getElementById('frameContainer');
+
+    // Set the canvas dimensions to match the video frames
+    canvas.width = 730;
+    canvas.height = 730;
+
+    let encodedData = "";
+
+    video.addEventListener('play', function () {
+        let $this = this;
+        (function loop() {
+            if (!$this.paused && !$this.ended) {
+                context.drawImage($this, 0, 0, $this.videoWidth, $this.videoHeight);
+                canvas.toBlob(function(blob) {
+                    let url = URL.createObjectURL(blob);
+                    let img = new Image();
+                    img.onload = function() {
+                        frameContainer.appendChild(img);
+                        let code = jsQR(context.getImageData(0, 0, img.width, img.height).data, img.width, img.height);
+                        if (code) {
+                            encodedData += code.data;
+                            console.log("QR code found: " + code.data);
+                        } else {
+                            console.log("No QR code found in frame");
+                        }
+                        URL.revokeObjectURL(url);
+                    };
+                    img.src = url;
+                });
+                setTimeout(loop, 1000 / 30);
+            }
+        })();
+    }, 0);
+
+
+    video.addEventListener('ended', function () {
+        try {
+            let decodedData = atob(encodedData.replace(/-/g, '+').replace(/_/g, '/'));
+            let bytes = new Uint8Array(decodedData.length);
+            for (let i = 0; i < decodedData.length; i++) {
+                bytes[i] = decodedData.charCodeAt(i);
+            }
+            let decompressedData = pako.inflate(bytes);
+            let binaryString = String.fromCharCode.apply(null, decompressedData);
+            output.value = binaryString;
+            console.log("Finished processing video. Total decoded data:", binaryString);
+        } catch (error) {
+            console.error("Error during decoding or decompression:", error);
+        }
+    }, 0);
+</script>
+
+</body>
+</html>
